@@ -1,0 +1,710 @@
+
+# This program calculates the orbit of 3I/ATLAS using method highlighted in https://adsabs.harvard.edu/pdf/2003ala..conf...85B
+import numpy as np
+from astropy.time import Time
+from numpy.polynomial import Polynomial
+from scipy.optimize import root
+from astropy.coordinates import get_body_barycentric
+import astropy.units as u
+from astropy.constants import GM_sun
+import pandas as pd
+
+# have 2 sets of obs I can use, one from August 24 and the other from September 4.
+
+'''
+--------------------------------------
+'''
+# 1. from August 24, a subset of 800 images out of 1k of "usable" ones. Originally from Table.tbl.
+# I can't load more than 800 images at once in AIJ...
+read_excel = pd.read_excel('.../Subset_meas_2USE.xlsx')
+
+times1 = read_excel['JD_UTC']
+t1 = Time(times1, format='jd', scale='utc')
+time_in_secs1 = (t1.jd - t1.jd[0]) * 24 * 3600   # 't.jd[0]' is the Julian date for the 1st image
+# num of secs since the first image.
+RA1 = read_excel['RA_T1']
+DEC1 = read_excel['DEC_T1']
+
+times = time_in_secs1 # list of times from first image to be used in IOD
+# print('times IOD:', times)
+alpha = RA1.tolist() # list of RA vals for IOD
+delta = DEC1.tolist() # list of DEC vals for IOD
+# print(len(times), '\n', len(alpha), '\n', len(delta))
+'''
+--------------------------------------
+'''
+
+
+'''
+--------------------------------------
+'''
+
+angular_meas = {"RAs": alpha, "DECs": delta} # dict comprising both lists
+
+# Components of the vector position in 3D space:
+# also converting from the coordinates from degrees to radians
+u1 = np.cos(np.radians(angular_meas["RAs"])) * np.cos(np.radians(angular_meas["DECs"])) # x Cartesian coordinate
+u2 = np.sin(np.radians(angular_meas["RAs"])) * np.cos(np.radians(angular_meas["DECs"])) # y
+u3 = np.sin(np.radians(angular_meas["DECs"])) # z
+# print('u1: ', u1)
+
+vect_position = [u1, u2, u3]
+# print(vect_position)
+vect_Ear_comet = np.array(vect_position).T # for future cross prod
+# using the tranpose, each column is now either times, RAs or DECs
+# print('vector Earth to comet :', vect_Ear_comet)
+# print('shape :', vect_Ear_comet.shape) # 3 rows, the 1st corresponding to times, 2nd to RAs, 3rd to DECs
+                                         # with as many columns as measurements.
+
+# unit_vect_check = np.sqrt(u1**2 + u2**2 + u3**2)
+# print('is this a unit vect?', unit_vect_check)
+# output is [1., 1.] so each unit vector (that for RAs and that for DECs) has a correct magn of 1.
+
+# initially, leave data uncorrected for parallax
+
+# # if d_alpha and d_delta are the errors in the spher coords, resp:
+# d_alpha = []
+# d_delta = []
+# d_u = np.abs([np.cos(delta * d_alpha), d_delta]) # d_u can be bigger or equal to the RHS.
+
+# fitting a polynomial thru components of u enables to compute the 1st n 2nd derivatives:
+# parabola at min, in terms of order of polyn, quartic at most.
+
+# propper array for time values:
+times_array = np.array(times)
+# print(times, times_array)
+
+# poly coefficients for u1, u2 & u3, resp:
+coeff_u1 = np.polyfit(times_array, u1, 4) # output for coefficient x: u1(t) = x_4*t^4 + x_3*t^3 + x_2*t^2 + x_1*t + x_0
+coeff_u2 = np.polyfit(times_array, u2, 4)
+coeff_u3 = np.polyfit(times_array, u3, 4)
+# print(coeff_u1)
+
+# re-ordering such that 0th order appears first:
+coeff_u1_ord = coeff_u1[::-1] # x_0 +  x_1*t + x_2*t^2 + x_3*t^3 + x_4*t^4
+coeff_u2_ord = coeff_u2[::-1]
+coeff_u3_ord = coeff_u3[::-1]
+# print(coeff_u1_ord)
+
+# turning the list of coefficients into a Polynomial because that is what needs to be fed to the deriv() fct:
+poly_u1 = Polynomial(coeff_u1_ord)
+poly_u2 = Polynomial(coeff_u2_ord)
+poly_u3 = Polynomial(coeff_u3_ord)
+# print(poly_u1)
+
+# First deriv of position vectors:
+veloc1 = poly_u1.deriv(1) # polynomial
+veloc2 = poly_u2.deriv(1)
+veloc3 = poly_u3.deriv(1)
+# print(veloc1)
+
+# Evaluating polyn at specific times and turning it into a vector/array:
+vect_veloc = np.array([veloc1(times_array), veloc2(times_array), veloc3(times_array)])
+# print(vect_veloc)
+veloc_vect_Ear_comet = vect_veloc.T # transpose to get (800, 3) instead of (3, 800) for cross prod
+# print(veloc_vect_Ear_comet)
+# print(veloc_vect_Ear_comet.shape)
+
+# Second deriv of vect pos:
+acc1 = veloc1.deriv(1) # polynomial
+acc2 = veloc2.deriv(1)
+acc3 = veloc3.deriv(1)
+# acc1_check = poly_u1.deriv(2)
+# print(acc1, acc1_check)
+
+# Evaluating polyn at specific times and turning it into a vector/array:
+acc_vect = np.array([acc1(times_array), acc2(times_array), acc3(times_array)])
+# print(acc_vect)
+acc_vect_Ear_comet = acc_vect.T # transpose to get (800, 3) instead of (3, 800) for cross prod
+# print(acc_vect_Ear_comet)
+# print(acc_vect_Ear_comet.shape)
+# unit_vect_check2 = np.sqrt(acc1(times_array[-1])**2 + acc2(times_array[-1])**2 + acc3(times_array[-1])**2)
+# print('is this a unit vect?', unit_vect_check2) # NO
+
+# check residual error:
+u1_fit = poly_u1(times_array) # polynomial incl coefficients used with the time as the variable
+# print(u1_fit, u1)
+u2_fit = poly_u2(times_array)
+# print(u2_fit, u2)
+u3_fit = poly_u3(times_array)
+# print(u3_fit, u3)
+resid1 = u1 - u1_fit
+resid2 = u2 - u2_fit
+resid3 = u3 - u3_fit
+RMSE = np.sqrt((resid1**2 + resid2**2 + resid3**2)/3)
+# print('RMSE for u: ', RMSE) # one value for each measurement
+
+####
+
+# The geocentric DIST is called p, the heliocentric DIST, r, and the VECTOR from the SUN to the EARTH is R.
+# found 5 equations with 5 unknowns on paper: p, r_1, r_2, r_3, r. p_dot is also a time-dependent unknown,
+# but we approximate its value as a small num (otherwise the system is underdetermined).
+
+# First, defining known quantities using astropy built-in unit conversion package:
+mu_Sun = GM_sun.to(u.AU**3 / u.s**2).value
+
+# Vector from the Sun to the Earth:
+
+# barycentric positions of the Earth and the Sun in AU:
+# The barycentre is the centre of mass between the Earth and the Sun, almost at the Sun.
+earth = get_body_barycentric('earth', t1)  # len of vector <= 1 AU
+# print(earth)
+# print(type(earth))
+sun = get_body_barycentric('sun', t1) # 'wobbles' of Sun around barycentre in AU.
+# print(sun)
+
+R = earth.xyz - sun.xyz # vector from Sun to Earth. Also an array of R1, R2 and R3
+                        # '.xyz' turns the coordinate representation obj into a NumPy array w units
+# print(R)
+R_au = R.to(u.AU) # quantity obj in AU
+R1, R2, R3 = R_au.to_value() # '.to_value strips the units from R1, R2, R3
+# print('R1: ', R1)
+
+vect_Sun_Earth = R.T
+# print('vector Sun Earth: ', vect_Sun_Earth)
+# print('shape2 :', vect_Sun_Earth.shape) # 800 rows, 3 columns
+
+# First and second derivatives of R:
+# poly coefficients for R1, R2 & R3, resp:
+coeff_R1 = np.polyfit(times_array, R1, 4) # output for coefficient x: R1(t) = x_4*t^4 + x_3*t^3 + x_2*t^2 + x_1*t + x_0
+coeff_R2 = np.polyfit(times_array, R2, 4)
+coeff_R3 = np.polyfit(times_array, R3, 4)
+# print(coeff_R1)
+
+# re-ordering such that 0th order appears first:
+coeff_R1_ord = coeff_R1[::-1] # x_0 +  x_1*t + x_2*t^2 + x_3*t^3 + x_4*t^4
+coeff_R2_ord = coeff_R2[::-1]
+coeff_R3_ord = coeff_R3[::-1]
+# print(coeff_R1_ord)
+
+# turning the list of coefficients into a Polynomial because that is what needs to be fed to the deriv() fct:
+poly_R1 = Polynomial(coeff_R1_ord)
+poly_R2 = Polynomial(coeff_R2_ord)
+poly_R3 = Polynomial(coeff_R3_ord)
+# print(poly_R2)
+
+# First deriv of position vectors:
+R_dot1 = poly_R1.deriv(1) # polynomial
+R_dot2 = poly_R2.deriv(1)
+R_dot3 = poly_R3.deriv(1)
+# print(R_dot1)
+
+# Evaluating polyn at specific times and turning it into a vector/array:
+R_dot_vect = np.array([R_dot1(times_array), R_dot2(times_array), R_dot3(times_array)])
+# print(R_dot_vect)
+veloc_vect_Sun_Earth = R_dot_vect.T # transpose to get (800, 3) instead of (3, 800) for cross prod
+# print(veloc_vect_Sun_Earth)
+# print(veloc_vect_Sun_Earth.shape)
+
+# Second deriv of vect pos:
+R_dbl_dot1 = R_dot1.deriv(1) # polynomial
+R_dbl_dot2 = R_dot2.deriv(1)
+R_dbl_dot3 = R_dot3.deriv(1)
+# print(R_dbl_dot3)
+
+# Evaluating polyn at specific times and turning it into a vector/array:
+R_dbl_dot_vect = np.array([R_dbl_dot1(times_array), R_dbl_dot2(times_array), R_dbl_dot3(times_array)])
+# print(R_dbl_dot_vect)
+acc_vect_Sun_Earth = R_dbl_dot_vect.T # transpose to get (800, 3) instead of (3, 800) for cross prod
+# print(acc_vect_Sun_Earth)
+# print(acc_vect_Sun_Earth.shape)
+
+# check residual error for R:
+R1_fit = poly_R1(times_array) # polynomial incl coefficients used with the time as the variable
+R2_fit = poly_R2(times_array)
+R3_fit = poly_R3(times_array)
+# print(u3_fit, u3)
+resid1 = R1 - R1_fit
+resid2 = R2 - R2_fit
+resid3 = R3 - R3_fit
+RMSE = np.sqrt((resid1**2 + resid2**2 + resid3**2)/3)
+# print('RMSE for R: ', RMSE) # one value for each measurement
+
+# Defining the coefficients for the new polynomial in p (one of the equations of the system):
+A = np.array(np.cross(vect_Ear_comet, acc_vect_Sun_Earth)) # vect_Ear_comet is the position vector
+# of the comet rel. to Earth
+# print('A: ', A) # A contains a diff value for each measurement
+
+B = np.array(np.cross(vect_Ear_comet, acc_vect_Ear_comet))
+# print('B: ', B)
+
+C = np.array(np.cross(vect_Ear_comet, veloc_vect_Ear_comet))
+# print('C: ', C)
+
+D = np.array(mu_Sun * (np.cross(vect_Ear_comet, vect_Sun_Earth))) # vect_Sun_Earth is the position
+# vector of the Earth rel. to the Sun
+# print ('D: ', D)
+
+E = np.array(u1 * R1 + u2 * R2 + u3 * R3) # element wise
+# print('E: ', E)
+
+F = np.array(R1**2 + R2**2 + R3**2) # this is basically R**2
+# print('F: ', F)
+
+# Coeff obtained via cross-prod are vectors thus contain 800 rows and 3 columns, where each row is
+# a measurement for the x_dir (column 1), the y_dir (col 2) and the z_dir (col 3). Those obtained
+# performing direct multiplicat° are the scalar value (single column) for each of the same 800 meas.
+
+# SOLVING THE SYSTEM
+# First, solving for the first measurement (using assumptions) to get guesses for unknowns.
+# Then, solving for each time step (WHERE DO WE REFINE)
+
+# initialising a matrix to store the unknown values at each measurement/timestep:
+results = np.zeros((len(times_array), 5))
+# print(results)
+
+def equations(vect_unknowns, p_dot, A, B, C, D, E, F,  R1, u1, R2, u2, R3, u3):
+
+    p, r, r1, r2, r3 = vect_unknowns
+
+    # # Equation 1: F_1(p, p_dot, p^-2) = 0
+    eq1_vect = A + p * B + 2 * p_dot * C + (D / (p**2 + 2 * p * E + F)**(1.5))
+    # This is a vector equation w 3 components. Need to multiply (dot product) by u (in the same
+    # direction as the line of sight of the initial RA and DEC measurements) such that the result
+    # of eq1, for a given measurement, is a scalar.
+    # unit vector u for this specific timestep:
+    u_unit_vect = np.array([u1, u2, u3])
+    eq1 = np.dot(u_unit_vect, eq1_vect)
+    # print('eq1: ', eq1)
+
+    # Equation 2: F_2(p, r1) = 0
+    eq2 = R1 + p * u1 - r1
+    # print('eq2: ', eq2)
+
+    # Equation 3: F_3(p, r2) = 0
+    eq3 = R2 + p * u2 - r2
+    # print('eq3: ', eq3)
+
+    # Equation 4: F_4(p, r3) = 0
+    eq4 = R3 + p * u3 - r3
+    # print('eq4: ', eq4)
+
+    # Equation 5: F_5(r, r1, r2, r3) = 0
+    eq5 = np.sqrt(r1**2 + r2**2 + r3**2) - r
+    # print('eq5: ', eq5)
+
+    return np.array([eq1, eq2, eq3, eq4, eq5]) # residual of each eq
+
+# Finding p_dot (the rate of change/velocity of the position vector from Earth to comet):
+# at each timestep, the comet's radial veloc (tow Earth) should be ~ project° of p_dot along u.
+
+# First, stacking the unit vectors into a matrix, such that each becomes a column:
+U = np.column_stack((u1, u2, u3)) # shape: (N,3)
+# u1, u2 and u3 are arrays ([N, 1]) where each value represents a measurement.
+
+# Using Least Squares to compute the p_dot that best matches all the radial components:
+
+# Component of the comet's veloc vect in the same dir as the LOS (Earth to comet direct°):
+proj_veloc = np.einsum('ij,ij->i', veloc_vect_Ear_comet, U)  # dot product on every row, for each timestep
+# veloc_vect_Ear_comet = matrix where each row is a vector w components in the x, y & z directions
+# U = matrix where each row is a unit vector from Earth to 3I/ATLAS for some timestep.
+
+# Least Squares formula involves summing along each timestep to get a single scalar value p_dot.
+# it works by fitting a slope to a supposedly linear trend between the num and deno:
+numerator = np.sum(np.einsum('ij,ij->i', U, veloc_vect_Ear_comet))
+denom = np.sum(np.einsum('ij,ij->i', U, U)) # (|U|*|U|)* num_timesteps = 1 * num_timesteps
+p_dot_ls = numerator / denom
+
+# print("Least Squares p_dot:", p_dot_ls) # in AU^3/s^2 -> expected to be small
+
+####
+
+# Initial measurements (1st timestep - index 0):
+p_in_guess = 2.65 # assumed geocentric dist to the comet in AU
+# I HAVE to get this value from another source, because regardless of if it's close to reality,
+# the program/model tries to overfit the guess...
+
+r1_in = R1[0] + p_in_guess * u1[0]
+r2_in = R2[0] + p_in_guess * u2[0]
+r3_in = R3[0] + p_in_guess * u3[0]
+r_in = np.sqrt(r1_in**2 + r2_in**2 + r3_in**2)
+
+init_state_vect = np.array([p_in_guess, r_in, r1_in, r2_in, r3_in])
+results[0] = init_state_vect
+
+# using scipy.optimize.root to loop through the subsequent measurements:
+for i in range(1, len(times_array)): # start at second timestep (index of 1) until the last timestep
+
+    dt = (times_array[i] - times_array[i-1]) # in seconds, time betw timesteps
+    # print('dt: ', dt)
+
+    # accessing the 0th index, corresponding to p, of the results from the previous measurement:
+    p_prev = results[i-1][0]
+    # print('p prev: ', p_prev)
+
+    # finding the rate of change of the comet's veloc wrt Earth (works for small timesteps as an approx):
+    v1_in, v2_in, v3_in = veloc_vect_Ear_comet[i-1]
+    v1_next, v2_next, v3_next = veloc_vect_Ear_comet[i] # next timestep
+    # magn of init veloc:
+    v_in = np.sqrt(v1_in**2 + v2_in**2 + v3_in**2)
+    v_next = np.sqrt(v1_next**2 + v2_next**2 + v3_next**2)
+    p_dot = (v_next - v_in) / dt
+
+    # use least-squares rate of displacement along LOS with Earth, for all timesteps:
+    # p_dot = p_dot_ls
+
+    initial_guess = results[i-1] # initial guessed values for the current run are set to the values obtained
+                                 # from the previous run
+
+    # print("Initial state vector: ", init_state_vect, "initial guess: ", initial_guess)
+
+    # calling the solver (scipy.optimize.root) with specific coefficients for this time step, A[i], B[i] etc.
+    # Goal is that values for unknowns are found such that the 5 equations are satisfied (=0).
+    sol = root(equations, initial_guess, args=(
+        p_dot, A[i], B[i], C[i], D[i], E[i], F[i],
+        R1[i], u1[i], R2[i], u2[i], R3[i], u3[i]
+    )) # args are all the known values from the previous timestep
+
+    initial_residuals = equations( # vect diff betw model's predictions & actual values
+    init_state_vect, # 1st guess for vect_unknowns = [p, r, r1, r2, r3]
+    p_dot,
+    A[0], B[0], C[0], D[0], E[0], F[0],
+    R1[0], u1[0], R2[0], u2[0],
+    R3[0], u3[0])
+    # print("Residuals for the initial guess: ", initial_residuals)
+
+    if not sol.success:
+        print(f"Solver failed at step {i}, time {times_array[i]}: {sol.message}")
+        break
+    
+    results[i] = sol.x
+
+    # print('Resulting values: ', results[i]) # array of len == 5 for each measurement with each unknown variable
+    # best fitted to the equations for the specific meas.
+    # Values are [p, r, r1, r2, r3]
+
+    # for any one measurement/iteration, many guesses are made by the solver as to the values of the unknown,
+    # until all equations are satisfied.
+
+    # have been guessing p instead of r since the orbit is heliocentric and I want to find the values wrt Sun.
+
+# ORBITAL PARAMETERS!!! (wrt SUN!!!)
+
+a_list = [] # storing all the results (1 per meas) for the semi maj axis
+E_magn_all = [] # total energy storage for computing lower and higher bounds (should be constant)
+h_magn_all = [] # ang momentum storage
+ranges_all = []
+speeds_all = []
+l_list = []
+e_list = []
+r_p_list = []
+b_list = []
+epsilon_list = [] # specific orb energy
+v_inf_list = []
+v_tan_list = []
+v_rad_list = []
+v_esc_list = []
+omega_list = []
+i_list = []
+
+# 2nd loop through all measurements starting from the very first:
+for meas in range(0, len(times_array)):
+
+    veloc_vect_Sun_comet = np.array(veloc_vect_Ear_comet[meas] + veloc_vect_Sun_Earth[meas]) # 1 vect per meas!!!!
+    # print(veloc_vect_Sun_comet)
+    v_x, v_y, v_z = veloc_vect_Sun_comet
+    # print('v_y: ', v_y) # FOR A PARTICULAR TIMESTEP, aka a single vector per iteration. Columns represent the directional axes.
+
+    speed = np.sqrt(v_x**2 + v_y**2 + v_z**2) # for a particular timestep
+    # print('speed', speed)
+    speeds_all.append(speed)
+    # print(speeds_all)
+    speeds_all_arr = np.array(speeds_all) # arrays enable to use np.mean, np.min and np.max
+    # print(speeds_all_arr)
+
+    # from previous computation ([r] - distance between the Sun and 3I/ATLAS):
+    range_Sun_com = results[meas][1] # 1 val per meas, scalar
+    # print(range_Sun_com)
+    ranges_all.append(range_Sun_com)
+    ranges_all_arr = np.array(ranges_all)
+    # print(ranges_all_arr) # this is for the distance comet-Sun
+
+    # position vector Sun -> comet:
+    vect_pos_wrt_Sun = [results[meas][2], results[meas][3], results[meas][4]] # each component of r found earlier
+    vect_Sun_comet = np.array(vect_pos_wrt_Sun)
+    # print(vect_Sun_comet)
+    r_x, r_y, r_z = vect_Sun_comet # 1 element each, a scalar
+    # print('r_z: ', r_z)
+    dist_Sun_com = np.sqrt(r_x**2 + r_y**2 + r_z**2)
+    # print(dist_Sun_com)
+
+    # SPECIFIC ANGULAR MOMENTUM (rel to comet's orbit around Sun):
+    h_vect = np.array(np.cross(vect_pos_wrt_Sun, veloc_vect_Sun_comet)) # each has one vector per measurement
+    # print('h as a vector =', h_vect) # 1 vector per measurement
+
+    # accessing each component of the vector:
+    h_magn = np.sqrt(h_vect[0]**2 + h_vect[1]**2 + h_vect[2]**2)
+    # print(h_magn)
+    h_magn_all.append(h_magn)
+    h_magn_all_arr = np.array(h_magn_all)
+
+    # Is the conservat° of energy principle satisfied?
+    # using magnitudes for the veloc and the position for this timestep:
+    E_magn = np.array(1/2 * (speed)**2 - mu_Sun / dist_Sun_com)
+    E_magn_all.append(E_magn)
+    E_magn_all_arr = np.array(E_magn_all)
+    # print(E_magn_all_arr) # all values one by one, not sep by a comma
+
+    # SEMI-MAJOR AXIS (vis-viva eq) - for this timestep
+    a = 1 / ((2 / dist_Sun_com) - (speed**2 / mu_Sun))
+    a_list.append(a)
+    a_array = np.array(a_list)
+
+    # finding the semi-latus rectum, eccentricity, perihelion distance, semi-minor axis, the
+    # excess velocity, the tangential/transverse veloc, the radial veloc and the escape veloc: 
+    l = h_magn**2 / mu_Sun
+    l_list.append(l)
+    l_array = np.array(l)
+
+    # specific orbital energy (should be >0)
+    epsilon = -mu_Sun / (2*a)
+    epsilon_list.append(epsilon)
+    epsilon_arr = np.array(epsilon_list)
+
+    # hyperbolic excess velocity
+    # v_inf = np.sqrt (-mu_Sun/a)
+    v_inf = np.sqrt(2 * epsilon)
+    v_inf_list.append(v_inf)
+    v_inf_arr = np.array(v_inf_list)
+
+    b = h_magn/v_inf
+    b_list.append(b)
+    b_array = np.array(b_list)
+
+    # ECCENTR
+    e = np.sqrt(abs ((1 + (b**2/a**2) )))
+    e_list.append(e)
+    e_array = np.array(e_list)
+
+    # periapsis
+    r_p = a * (1 - e)
+    r_p_list.append(r_p)
+    r_p_array = np.array(r_p_list)
+
+    v_tan = h_magn/dist_Sun_com
+    v_tan_list.append(v_tan)
+    v_tan_arr = np.array(v_tan_list)
+
+    v_rad_etc = np.sqrt(speed**2 - v_tan**2) # 'etc' to account for the vertical component
+    v_rad_list.append(v_rad_etc)
+    v_rad_arr = np.array(v_rad_list)
+
+    v_esc = np.sqrt(2 * mu_Sun / dist_Sun_com)
+    v_esc_list.append(v_esc)
+    v_esc_arr = np.array(v_esc_list)
+
+    # Computing the longitude of the ascending node (in plane of ecliptic, angle betw 'veneral pt'
+    # direction and line where the former plane crosses the orbital plane)
+    k_vect = np.array([0, 0, 1.0]) # unit vector in z direction (Cartesian)
+    N = np.cross(k_vect, h_vect) # node vector
+    N_x, N_y, N_z = N
+    # omega in rad:
+    tan_omega = (N_y / N_x)
+    omega = np.arctan(tan_omega)
+    if omega < 0: # convert to some value [0, 2π)
+        omega += 2*np.pi
+    # converting to degrees
+    omega_deg = np.degrees(omega)
+    omega_list.append(omega_deg)
+    omega_array = np.array(omega_list)
+
+    # inclination (angle betw equatorial and orbital planes)
+    k_magn = 1.0
+    cos_i = (np.dot(h_vect, k_vect)) / (h_magn * k_magn) # scalar
+    i = np.arccos(cos_i) # rad
+    i_deg = np.degrees(i)
+    i_list.append(i_deg)
+    i_array = np.array(i_list)
+
+# --- print statements of values of interest ---
+
+# Units...
+num_kms_in_1AU = 1.5 * 10**8
+
+# total energy (AU^2/s^2) ~ expected const
+E_mean = np.mean(E_magn_all_arr)
+E_low_bound = np.min(E_magn_all_arr)
+E_high_bound = np.max(E_magn_all_arr)
+print('Mean energy across all the measurements:', E_mean, 'AU^2/s^2, with a lower bound of', E_low_bound,
+      'AU^2/s^2 and a higher bound of', E_high_bound, 'AU^2/s^2.', '\n')
+
+# mean distance to comet (from the Sun) (AU)
+mean_range = np.mean(ranges_all_arr)
+min_range = np.min(ranges_all_arr)
+max_range = np.max(ranges_all_arr)
+print('Mean range to the Sun obtained during obs:', mean_range, 'AU, whereas the min range is:', min_range,
+      'AU and the max range is:', max_range, 'AU.', '\n')
+
+# specific angular momentum (AU^2/s) ~ expected const
+h_magn_mean = np.mean(h_magn_all_arr)
+h_low_bound = np.min(h_magn_all_arr)
+h_high_bound = np.max(h_magn_all_arr)
+print('Specific angular momentum ranges from', h_low_bound, 'AU^2/s to', h_high_bound, 'AU^2/s with a mean'
+      'value of', h_magn_mean, 'AU^2/s.', '\n')
+
+# mean relative speed between Sun and 3I/ATLAS (AU/s) - expected: ~58 km/s
+mean_speed = np.mean(speeds_all_arr)
+min_speed = np.min(speeds_all_arr) # min speed obtained
+max_speed = np.max(speeds_all_arr) # max
+print('Mean speed obtained during obs:', mean_speed, 'AU/s or', (mean_speed * num_kms_in_1AU),
+      'km/s, with a min of', (min_speed * num_kms_in_1AU), 'km/s and a max of', (max_speed * num_kms_in_1AU), 'km/s.', '\n')
+
+# SEMI-MAJOR AXIS (AU)
+a_mean = np.mean(a_array)
+a_low_bound = np.min(a_array)
+a_high_bound = np.max(a_array)
+print('a =', a_mean, 'AU, or', (a_mean * num_kms_in_1AU),
+      'with a lower bound at', a_low_bound, 'AU and a higher bound at', a_high_bound, 'AU.', '\n')
+
+# SEMI-LATUS RECTUM (units: (AU^2/s)^2 / AU^3/s^2 = AU^4/s^2 * s^2/AU^3 = AU)
+l_mean = np.mean(l_array)
+l_low_bound = np.min(l_array)
+l_high_bound = np.max(l_array)
+print('l =', l_mean, 'AU, or is in between', l_low_bound, 'AU and', l_high_bound, 'AU.', '\n')
+
+# ECCENTRICITY (expected val: 6.14) (unitless)
+# 1-e^2 = l/a
+e_mean = np.mean(e_array)
+e_low_bound = np.min(e_array)
+e_high_bound = np.max(e_array)
+print('e =', e_mean, ', or is in between', e_low_bound, 'and', e_high_bound, '.', '\n')
+
+# PERIHELION DIST (AU) - expected val: 1.36 AU
+r_p_mean = np.mean(r_p_array)
+r_p_low_bound = np.min(r_p_array)
+r_p_high_bound = np.max(r_p_array)
+print('r_p =', r_p_mean, 'AU or', (r_p_mean * num_kms_in_1AU) ,'km, or is in between', r_p_low_bound, 'AU and', r_p_high_bound, 'AU.', '\n')
+
+# SEMI-MINOR AXIS (AU)
+b_mean = np.mean(b_array)
+b_low_bound = np.min(b_array)
+b_high_bound = np.max(b_array)
+print('b =', b_mean, 'AU, or is in between', b_low_bound, 'AU and', b_high_bound, 'AU.', '\n')
+
+# EXCESS VELOCITY (AU/s) (const)
+v_inf_mean = np.mean(v_inf_arr)
+v_inf_low_bound = np.min(v_inf_arr)
+v_inf_high_bound = np.max(v_inf_arr)
+print('v_inf =', v_inf_mean, 'AU/s or', (v_inf_mean * num_kms_in_1AU),'km/s, or is in between', (v_inf_low_bound * num_kms_in_1AU),
+      'km/s and', (v_inf_high_bound * num_kms_in_1AU), 'km/s.', '\n')
+
+# ESCAPE VELOC (AU/s)
+v_esc_mean = np.mean(v_esc_arr)
+v_esc_low_bound = np.min(v_esc_arr)
+v_esc_high_bound = np.max(v_esc_arr)
+print('v_esc =', v_esc_mean, 'AU/s or', (v_esc_mean * num_kms_in_1AU),'km/s, or is in between', (v_esc_low_bound * num_kms_in_1AU), 'km/s and',
+      (v_esc_high_bound * num_kms_in_1AU), 'km/s.', '\n')
+
+'''
+------ CHECKS ------
+'''
+
+# tg veloc (AU/s)
+v_tan_mean = np.mean(v_tan_arr)
+v_tan_low_bound = np.min(v_tan_arr)
+v_tan_high_bound = np.max(v_tan_arr)
+print('v_tan =', v_tan_mean, 'AU/s or', (v_tan_mean * num_kms_in_1AU), 'km/s, or is in between', v_tan_low_bound, 'AU/s and', v_tan_high_bound, 'AU/s.', '\n')
+
+# v has components v_tan (transverse), v_rad, and v_vertical (which I don't have).
+# radial veloc (AU/s)
+v_rad_mean = np.mean(v_rad_arr)
+v_rad_low_bound = np.min(v_rad_arr)
+v_rad_high_bound = np.max(v_rad_arr)
+print('v_rad_etc =', v_rad_mean, 'AU/s or', (v_rad_mean * num_kms_in_1AU) ,'km/s, or is in between', v_rad_low_bound, 'AU/s and', v_rad_high_bound, 'AU/s.', '\n')
+
+print('epsilon =', np.mean(epsilon_arr), '\n')
+
+'''
+-------------------
+'''
+
+# LONGITUDE OF ASCENDING NODE (deg)
+omega_mean = np.mean(omega_array)
+omega_low_bound = np.min(omega_array)
+omega_high_bound = np.max(omega_array)
+print('omega =', omega_mean, 'deg, or is in between', omega_low_bound, 'deg and', omega_high_bound, 'deg.', '\n')
+
+# INCLINATION (deg)
+i_mean = np.mean(i_array)
+i_low_bound = np.min(i_array)
+i_high_bound = np.max(i_array)
+print('i =', i_mean, 'deg, or is in between', i_low_bound, 'deg and', i_high_bound, 'deg.', '\n')
+
+
+##################################################################################################################
+'''
+Finding the expected SNR/brightness and diameter/size values for the September 4 obs
+based on those from August 24 (over 11 days) (WRT EARTH).
+
+Size:
+https://astronomyonline.org/Science/SmallAngleFormula.asp
+Small Angle Formula enables to convert an angular size into a linear size.
+D = (alpha * p) / 206,265 where:
+- alpha is the angular size of the comet in arcsecs
+- D is the linear/physical diameter
+'''
+
+# Getting the angular diameter, alpha as a list:
+Full_Width_at_Half_Max = read_excel['FWHM_T1'] # list, in pixels
+# print(Full_Width_at_Half_Max)
+FWHM_list = list()
+FWHM_list.append(Full_Width_at_Half_Max)
+FWHM_arr = np.array(FWHM_list)
+mean_FWHM = np.nanmean(FWHM_arr) # ignore the NaNs!
+
+# https://telescope.live/blog/pixel-size-and-image-resolution#:~:text=To%20calculate%20the%20angular%20size,00376mm
+cam_pix_size = 7.38000011444092 * 10**-3 # given in AIJ image headers (common for all)
+scope_focal_len = 16 * 25.4 * 7.3 # resp, aperture/diameter of scope lens in inch, conversion to mm, focal ratio of focal reducer. All given for ROO
+num_arcsecs = 206265 * (cam_pix_size / scope_focal_len) # https://telescope.live/blog/pixel-size-and-image-resolution#:~:text=To%20calculate%20the%20angular%20size,00376mm
+# print(num_arcsecs) # angular size of a pixel: 0.513''/pix
+
+# converting the FWHM mean value to arcseconds:
+FWHM_arcsecs = mean_FWHM * num_arcsecs
+# print(FWHM_arcsecs)
+
+# computed final range from Earth vector (not a unit vector):
+p_list = []
+for image in range(0, len(times_array)):
+    # loops through meas/images
+    range_Earth_com = results[image][0]
+    # print(range_Earth_com)
+    range_meters = (range_Earth_com * u.au).to(u.m).value
+    p_list.append(range_meters)
+    p_array = np.array(p_list)
+
+p = np.mean(p_array) # p is the mean distance from comet to Earth in m
+# print(p)
+D = (FWHM_arcsecs * p) / 206265
+print('Diameter outputted by the small-angle formula for August 24:', (D * 10**-3), 'km whereas the nucleus is expected to be between 0.32 ' \
+'and 5.6 km, and the CO2 coma is expected to have a diameter of 700,000 km.')
+
+# range expected on September 4 at 8 PM AEST or 10 AM UTC, from JPL:
+p_Sept = 2.56577506684545 # AU
+p_Sept_meters = (p_Sept * u.au).to(u.m).value
+
+# Expected angular diameter, alpha:
+alpha_Sept = (D * 206265) / p_Sept_meters
+print('Expected angular diam value for Sept 4, in arcseconds:', alpha_Sept,', compared to', FWHM_arcsecs, "'' on Aug 24.")
+exp = FWHM_arcsecs * (p/p_Sept_meters) # same result
+
+
+# Brightness change expected
+# getting max brightness and SNR per measurement from same 800-image dataset:
+max_brightn_val2 = read_excel['Peak_T1'] # list, in peaks
+comet_SNR = read_excel['rel_flux_SNR_T1'] # list
+
+# taking averages:
+max_brightn_arr = np.array(max_brightn_val2)
+SNR_arr = np.array(comet_SNR)
+mean_max_brightn = np.mean(max_brightn_arr)
+# print(mean_max_brightn) # 1691 peaks
+mean_SNR = np.mean(SNR_arr) # August
+# print(mean_SNR) # 14.83
+
+# FWHM scales linearly w dist:
+SNR_Sept = mean_SNR * (p/p_Sept_meters)
+print('Expected SNR in September:', SNR_Sept, 'VS in August:', mean_SNR, '.')
+# using the inverse-square law for brightnesses VS distances:
+brightn_Sept = mean_max_brightn * (p/p_Sept_meters)
+print('Expected max brightness in peaks for September:', brightn_Sept, 'VS in August:', mean_max_brightn, '.')
+# increase in both as expected.
