@@ -15,7 +15,6 @@ import pandas as pd
 --------------------------------------
 '''
 # 1. from August 24, a subset of 800 images out of 1k of "usable" ones. Originally from Table.tbl.
-# I can't load more than 800 images at once in AIJ...
 read_excel = pd.read_excel('.../Subset_meas_2USE.xlsx')
 
 times1 = read_excel['JD_UTC']
